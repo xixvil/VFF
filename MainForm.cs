@@ -10,29 +10,32 @@ using Emgu.CV.GPU;
 using Emgu.Util;
 using Emgu.CV.Structure;
 using Emgu.CV.CvEnum;
-using DirectShowLib;
+using DirectShowLib; // нужно чтобы найти все камеры на компе
 using CSIL;
 
+// VFF - Virtual Force Field
 namespace VFF
 {
     public partial class MainForm : Form
     {
-        SkinInterface Iface;
-        SignalParams SignalPars;
-        SkinInterface.SoundDevice[] Devices;
-        private Capture Camera;
-        private HaarCascade Hand;
-        private GpuCascadeClassifier GpuHand;
-        private bool GPU;
-        bool HandDetected;
-        PointF HandPos;
+        SkinInterface Iface; // экземпляр интерфейса
+        SignalParams SignalPars; // экземпляр класса параметров сигнала
+        SkinInterface.SoundDevice[] Devices; // устройства аудиовывода
+        Capture Camera; // экземпляр камеры
+        HaarCascade Hand; // каскад для распознавания руки
+        GpuCascadeClassifier GpuHand; // каскад для распознавания руки на видеокарте
+        bool GPU; // флаг присутствия видокарты с технологией CUDA
+        bool HandDetected; // флаг, что рука в кадре была обнаружена
+        PointF HandPos; // координаты центра руки в кадре
 
+        // класс параметров сигнала
         private class SignalParams : SkinInterface.SignalFunctionParams
         {
             public float Amplitude;
             public float Frequency;
         }
 
+        // функция сигнала. вшита формула для прямоугольного сигнала
         static float Signal(float t, SkinInterface.SignalFunctionParams pars)
         {
             SignalParams Parameters = (SignalParams)pars;
@@ -43,16 +46,19 @@ namespace VFF
         public MainForm()
         {
             InitializeComponent();
-            if (GpuInvoke.HasCuda)
+            if (GpuInvoke.HasCuda) // проверяем, есть ли поддержка  CUDA
                 GPU = true;
             else
                 GPU = false;
 
             if (GPU)
-                GpuHand = new GpuCascadeClassifier("hand.xml");
+                GpuHand = new GpuCascadeClassifier("hand.xml"); // загружаем каскад для руки
+                // GpuHand = new GpuCascadeClassifier("palm.xml"); // или для ладони
+                // GpuHand = new GpuCascadeClassifier("fist.xml"); // или для кулака
             else
                 Hand = new HaarCascade("hand.xml");
-
+                // Hand = new HaarCascade("palm.xml"); // или для ладони
+                // Hand = new HaarCascade("fist.xml"); // или для кулака
             HandDetected = false;
             HandPos = new PointF(0, 0);
         }
@@ -61,8 +67,8 @@ namespace VFF
         {
             try
             {
-                Camera = new Capture(cbCameras.SelectedIndex);
-                Camera.FlipHorizontal = true;
+                Camera = new Capture(cbCameras.SelectedIndex); // включаем камеру с номером указанном в комбобоксе
+                Camera.FlipHorizontal = true; // меняем местами право и лево в кадре, иначе очень неудобно - двигаешь рукой вправо, в кадре движение идёт влево
             }
             catch (Exception except)
             {
@@ -90,7 +96,7 @@ namespace VFF
 
         private void MainForm_Load(object sender, EventArgs e)
         {
-            DsDevice[] Cameras = DsDevice.GetDevicesOfCat(FilterCategory.VideoInputDevice);
+            DsDevice[] Cameras = DsDevice.GetDevicesOfCat(FilterCategory.VideoInputDevice); // ищем все видеоустройства с функцией ввода
 
             if (Cameras.Length == 0)
             {
@@ -100,9 +106,9 @@ namespace VFF
             }
             else
                 for (int i = 0; i < Cameras.Length; i++)
-                    cbCameras.Items.Add(String.Format("[{0}] {1}", i, Cameras[i].Name));
+                    cbCameras.Items.Add(String.Format("[{0}] {1}", i, Cameras[i].Name)); // добавляем их в список, индекс массива как раз будет совпадать с номером устройства
             
-            Devices = SkinInterface.getSoundDevices();
+            Devices = SkinInterface.getSoundDevices(); // ищем все аудоустройства с функцией вывода
 
             if (Devices.Length == 0)
             {
@@ -112,36 +118,37 @@ namespace VFF
             }
 
             for (int i = 0; i < Devices.Length; i++)
-                cbCSIL.Items.Add(Devices[i].getName());
+                cbCSIL.Items.Add(Devices[i].getName()); // тоже добавляем их по именам в список
 
             SignalPars = new SignalParams();
-            SignalPars.Amplitude = 0.0f;
-            SignalPars.Frequency = 200f;
+            SignalPars.Amplitude = 0.0f; // амплитуду уводим в ноль 
+            SignalPars.Frequency = 40f; // частоту устанавливаем такой же как выбрана по умолчанию на форме
 
             cbCameras.SelectedIndex = 0;
             cbCSIL.SelectedIndex = 0;
         }
 
+        // таймер, который вызывается 10 раз в секунду (т.е. Interval у него 100 мс, если это много можно уменьшить в его свойствах)
         private void FrameTimer_Tick(object sender, EventArgs e)
         {
-            Image<Bgr, Byte> Frame = Camera.QueryFrame();
+            Image<Bgr, Byte> Frame = Camera.QueryFrame(); // получаем очередной цветной кадр
 
-            Frame = Frame.Resize(pbCamera.Width, pbCamera.Height, INTER.CV_INTER_CUBIC);
-            if (GPU)
+            Frame = Frame.Resize(pbCamera.Width, pbCamera.Height, INTER.CV_INTER_CUBIC); // масштабируем его на размеры PictureBox'а который стоит на форме
+            if (GPU) // если поддержка CUDA имеется
             {
-                GpuImage<Bgr, Byte> GpuFrame = new GpuImage<Bgr, byte>(Frame);
-                GpuImage<Gray, Byte> GpuGrayFrame = GpuFrame.Convert<Gray, Byte>();
-                Rectangle[] Hands = GpuHand.DetectMultiScale<Gray>(GpuGrayFrame, 1.1, 10, Size.Empty);
-                if (Hands.Length != 0)
+                GpuImage<Bgr, Byte> GpuFrame = new GpuImage<Bgr, byte>(Frame); // конвертируем тип Image в GpuImage
+                GpuImage<Gray, Byte> GpuGrayFrame = GpuFrame.Convert<Gray, Byte>(); // преобразуем кадр в серый (каскады обучались на серых кадрах)
+                Rectangle[] Hands = GpuHand.DetectMultiScale<Gray>(GpuGrayFrame, 1.1, 10, Size.Empty); // находим все прямоугольники, содержащие руку
+                if (Hands.Length != 0) // если их нашлось больше нуля
                 {
-                    HandDetected = true;
-                    HandPos = new PointF((Hands[0].X + Hands[0].X + Hands[0].Width) / 2, (Hands[0].Y + Hands[0].Y + Hands[0].Height) / 2);
+                    HandDetected = true; // устанавливаем флаг
+                    HandPos = new PointF((Hands[0].X + Hands[0].X + Hands[0].Width) / 2, (Hands[0].Y + Hands[0].Y + Hands[0].Height) / 2); // находим и сохраняем центр прямоугольника
                 }
             }
-            else
+            else // если поддержки CUDA нету, то всё тоже самое, с учётом типов
             {
                 Image<Gray, Byte> grayFrame = Frame.Convert<Gray, Byte>();
-                var Hands = Hand.Detect(grayFrame);
+                MCvAvgComp[] Hands = Hand.Detect(grayFrame);
                 if (Hands.Length != 0)
                 {
                     HandDetected = true;
@@ -149,26 +156,29 @@ namespace VFF
                 }
             }
 
+            // рисуем вертикальную линию зелёного цвета - нашу виртуальную стенку
             Frame.Draw(new LineSegment2D(new Point(pbCamera.Width / 2 - 100, 0), new Point(pbCamera.Width / 2 - 100, pbCamera.Height)), new Bgr(0, 255, 0), 5);
             
-            if (HandDetected)
+            if (HandDetected) // если рука была обнаружена, то ...
             {
-                Frame.Draw(new CircleF(HandPos, 5), new Bgr(0, 255, 0), 2);
-                if (Math.Abs(HandPos.X - (pbCamera.Width / 2 - 100)) < 30)
-                    SignalPars.Amplitude = 0.7f;
+                Frame.Draw(new CircleF(HandPos, 5), new Bgr(0, 255, 0), 2); // рисуем на этом месте кружок
+                if (Math.Abs(HandPos.X - (pbCamera.Width / 2 - 100)) < 30) // если это место в кадре отстоит не более чем на 30 пикселей от линии, то...
+                    SignalPars.Amplitude = 0.7f; // вклчаем сигнал на амплитуду 0.7
                 else
-                    SignalPars.Amplitude = 0.0f;
+                    SignalPars.Amplitude = 0.0f; // иначе отключаем сигнал
             }
 
-            pbCamera.Image = Frame.ToBitmap();
+            pbCamera.Image = Frame.ToBitmap(); // выдаём кадр на PictureBox
 
         }
 
+        // смена устройства вывода для интерфейса
         private void cbCSIL_SelectedIndexChanged(object sender, EventArgs e)
         {
             Iface = new SkinInterface(Devices[cbCSIL.SelectedIndex], new SkinInterface.SignalFunction(Signal), SignalPars);
         }
 
+        // изменение частоты сигнала
         private void udFreq_ValueChanged(object sender, EventArgs e)
         {
             SignalPars.Frequency = (float)udFreq.Value;
