@@ -31,6 +31,8 @@ namespace VFF
         PointF NewHandPos; // новая позиция руки
         PointF HandPos; // текущая позиция руки
 
+        static int WALL_DEPTH = 50; // ширина силового поля в пикселях
+
         // класс параметров сигнала
         private class SignalParams : SkinInterface.SignalFunctionParams
         {
@@ -71,6 +73,11 @@ namespace VFF
             NewHandPos = new PointF(pbCamera.Width / 2, pbCamera.Height / 2); // устанавливаем "руку" изначально на центр экрана
             HandPos = new PointF(pbCamera.Width / 2, pbCamera.Height / 2); // то же
             FormTitle = Text; // сохраняем изначальный заголовок формы
+
+            Image<Hsv, Byte> Heatmap = new Image<Hsv, Byte>(pbSignalStrength.Size); // это раскарска импровизированного прогресбара :)
+            for (int i = 0; i < Heatmap.Height; i++)
+                Heatmap.Draw(new LineSegment2D(new Point(0, i), new Point(Heatmap.Width, i)), new Hsv(125*i/Heatmap.Height, 255, 255), 1); // создаём раскраску
+            pbSignalStrength.Image = Heatmap.ToBitmap(); // и загружаем её в пикчебокс
         }
 
         private void btStart_Click(object sender, EventArgs e)
@@ -143,20 +150,30 @@ namespace VFF
         {
             Image<Bgr, Byte> Frame = Camera.QueryFrame(); // получаем очередной цветной кадр
             Stopwatch Timer = Stopwatch.StartNew(); // запускаем новый таймер
+            Rectangle[] GpuHands; // массив распознанных областей на картинке с помощью CUDA
+            MCvAvgComp[] Hands;  // то же, но с помощью CPU
+            float dist = 0; // расстояние от граници виртуального силового поля
 
             Frame = Frame.Resize(pbCamera.Width, pbCamera.Height, INTER.CV_INTER_CUBIC); // масштабируем его на размеры PictureBox'а который стоит на форме
             if (GPU) // если поддержка CUDA имеется
             {
                 GpuImage<Bgr, Byte> GpuFrame = new GpuImage<Bgr, byte>(Frame); // конвертируем тип Image в GpuImage
                 GpuImage<Gray, Byte> GpuGrayFrame = GpuFrame.Convert<Gray, Byte>(); // преобразуем кадр в серый (каскады обучались на серых кадрах)
-                Rectangle[] Hands = GpuHand.DetectMultiScale<Gray>(GpuGrayFrame, 1.1, 10, Size.Empty); // находим все прямоугольники, содержащие руку
-                if (Hands.Length != 0) // если их нашлось больше нуля
-                    NewHandPos = new PointF((Hands[0].X + Hands[0].X + Hands[0].Width) / 2, (Hands[0].Y + Hands[0].Y + Hands[0].Height) / 2); // находим и сохраняем центр прямоугольника
+                try
+                {
+                    GpuHands = GpuHand.DetectMultiScale<Gray>(GpuGrayFrame, 1.3, 3, Size.Empty); // находим все прямоугольники, содержащие руку
+                }
+                catch (AccessViolationException ave) // исправление бага EmguCV.GPU - иногда тут вылетает AccessViolationException
+                {
+                    return; // если оно вылетело - просто прекращаем дальнейшую обработку кадра
+                }
+                if (GpuHands.Length != 0) // если их нашлось больше нуля
+                    NewHandPos = new PointF(GpuHands[0].X + GpuHands[0].Width / 2, GpuHands[0].Y + GpuHands[0].Height / 2); // находим и сохраняем центр прямоугольника
             }
             else // если поддержки CUDA нету, то всё тоже самое, с учётом типов
             {
                 Image<Gray, Byte> grayFrame = Frame.Convert<Gray, Byte>();
-                MCvAvgComp[] Hands = Hand.Detect(grayFrame);
+                Hands = Hand.Detect(grayFrame);
                 if (Hands.Length != 0)
                     NewHandPos = new PointF((Hands[0].rect.X + Hands[0].rect.X + Hands[0].rect.Width) / 2, (Hands[0].rect.Y + Hands[0].rect.Y + Hands[0].rect.Height) / 2); // находим и сохраняем центр прямоугольника
             }
@@ -165,11 +182,11 @@ namespace VFF
                 HandPos = NewHandPos; // устанавливаем новую позицию руки на экране
 
             // рисуем вертикальную линию зелёного цвета - нашу виртуальную стенку
-            Frame.Draw(new LineSegment2D(new Point(pbCamera.Width / 2 - 100, 0), new Point(pbCamera.Width / 2 - 100, pbCamera.Height)), new Bgr(0, 255, 0), 5);
+            Frame.Draw(new LineSegment2D(new Point(pbCamera.Width / 2 - 100, 0), new Point(pbCamera.Width / 2 - 100, pbCamera.Height)), new Bgr(0, 255, 0), 3);
             
-            Frame.Draw(new CircleF(HandPos, 5), new Bgr(0, 255, 0), 2); // рисуем на месте руки кружок
-            if (Math.Abs(HandPos.X - (pbCamera.Width / 2 - 100)) < 30) // если это место в кадре отстоит не более чем на 30 пикселей от линии, то...
-                SignalPars.Amplitude = 0.7f; // вклчаем сигнал на амплитуду 0.7
+            Frame.Draw(new CircleF(HandPos, 3), new Bgr(0, 0, 255), 4); // рисуем на месте руки кружок
+            if ((dist = Math.Abs(HandPos.X - (pbCamera.Width / 2 - 100))) < WALL_DEPTH) // если это место в кадре отстоит не более чем на 30 пикселей от линии, то...
+                SignalPars.Amplitude = (float)(1.0f / (1.0f + (float)Math.Exp((double)(12.0f * dist / WALL_DEPTH - 6.0f)))); // меняем уровень сигнала от минимального до максимального по экспоненте (параметры подобраны вручную)
             else
                 SignalPars.Amplitude = 0.0f; // иначе отключаем сигнал
 
@@ -184,8 +201,9 @@ namespace VFF
                 if (FrameTimer.Interval > Timer.ElapsedMilliseconds)
                     FrameTimer.Interval -= 10;
             }
-            
-            Text = FormTitle + " FPS = " + FPS + " (" + FrameTimer.Interval + " ms) Using: " + (GPU ? "CUDA GPU" : "CPU"); // обновляем заголовок
+
+            pbSignalValue.Height = (int)(pbSignalStrength.Height * (1.0f - SignalPars.Amplitude)); // прогрессбар рисуется очень просто: поверх раскраски висит ещё один почти бесполезный пикчебокс, который накрывает раскраску. когда уровень сигнала меняется мы меняем высоту эту накрывающего пикчебокса
+            Text = FormTitle + " FPS = " + FPS + " (" + FrameTimer.Interval + " ms) Using: " + (GPU ? "CUDA" : "CPU") + " Pos(" + HandPos.X + ", " + HandPos.Y + ")"; // обновляем заголовок
         }
 
         // смена устройства вывода для интерфейса
